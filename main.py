@@ -261,6 +261,7 @@ class AdvanceRAG:
         query: str,
         top_k: int | None = None,
         modality_filter: str = "both",
+        source_filter: set[str] | None = None,
     ) -> list[ChunkRecord]:
         if not self.is_ready or self.index is None or self.emb_matrix is None:
             raise ValueError("Index is not ready. Build the index before querying.")
@@ -278,6 +279,8 @@ class AdvanceRAG:
             if modality_filter == "text" and record.modality != "text":
                 continue
             if modality_filter == "image" and record.modality != "image":
+                continue
+            if source_filter and record.source not in source_filter:
                 continue
             results.append(record)
         return results
@@ -310,6 +313,7 @@ class AdvanceRAG:
         top_k: int | None = None,
         candidate_k: int | None = None,
         modality_filter: str = "both",
+        source_filter: set[str] | None = None,
         use_rerank: bool = True,
         use_vision: bool = False,
         memory: list[dict[str, str]] | None = None,
@@ -319,7 +323,12 @@ class AdvanceRAG:
         start_total = time.perf_counter()
 
         start_retrieval = time.perf_counter()
-        candidates = self.retrieve(query, top_k=candidate_k or (top_k or self.top_k), modality_filter=modality_filter)
+        candidates = self.retrieve(
+            query,
+            top_k=candidate_k or (top_k or self.top_k),
+            modality_filter=modality_filter,
+            source_filter=source_filter,
+        )
         timing["retrieval_s"] = time.perf_counter() - start_retrieval
 
         docs = candidates

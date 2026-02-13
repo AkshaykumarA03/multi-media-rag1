@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import datetime
+import json
 from pathlib import Path
 import streamlit as st
 
@@ -110,6 +113,14 @@ def apply_custom_css(theme_mode: str) -> None:
             padding: 12px;
         }}
 
+        .block {{
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--panel);
+            padding: 14px;
+            margin-bottom: 12px;
+        }}
+
         .status-label {{
             font-size: 0.72rem;
             text-transform: uppercase;
@@ -122,6 +133,17 @@ def apply_custom_css(theme_mode: str) -> None:
             font-family: 'IBM Plex Mono', monospace;
             font-size: 1.02rem;
             font-weight: 500;
+        }}
+
+        div[data-testid="stChatMessage"] {{
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: var(--panel);
+            padding: 4px;
+        }}
+
+        div[data-testid="stHorizontalBlock"] button[kind="secondary"] {{
+            border-radius: 999px;
         }}
 
         @keyframes fadeIn {{
@@ -198,21 +220,64 @@ def render_header(engine: AdvanceRAG | None) -> None:
     st.caption(f"Text chunks: {text_count} - Image chunks: {image_count}")
 
 
+def get_source_rows(engine: AdvanceRAG) -> list[dict[str, int | str]]:
+    bucket: dict[str, dict[str, int]] = defaultdict(lambda: {"chunks": 0, "text": 0, "image": 0, "words": 0})
+    for chunk in engine.chunks:
+        row = bucket[chunk.source]
+        row["chunks"] += 1
+        row["words"] += len(chunk.text.split())
+        if chunk.modality == "image":
+            row["image"] += 1
+        else:
+            row["text"] += 1
+
+    rows: list[dict[str, int | str]] = []
+    for source, stats in sorted(bucket.items(), key=lambda x: x[0].lower()):
+        rows.append(
+            {
+                "source": source,
+                "chunks": stats["chunks"],
+                "text_chunks": stats["text"],
+                "image_chunks": stats["image"],
+                "words": stats["words"],
+            }
+        )
+    return rows
+
+
+def render_kb_explorer(engine: AdvanceRAG | None) -> None:
+    st.subheader("Knowledge Base Explorer")
+    if not engine or not engine.chunks:
+        st.info("No knowledge indexed yet. Upload files and build the index first.")
+        return
+
+    rows = get_source_rows(engine)
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    top_sources = sorted(rows, key=lambda r: int(r["chunks"]), reverse=True)[:10]
+    if top_sources:
+        chart_data = {r["source"]: int(r["chunks"]) for r in top_sources}
+        st.bar_chart(chart_data, height=220)
+
+
 def main() -> None:
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if "theme_mode" not in st.session_state:
-        st.session_state.theme_mode = "Light"
+    if "dark_theme" not in st.session_state:
+        st.session_state.dark_theme = False
+    if "quick_prompt" not in st.session_state:
+        st.session_state.quick_prompt = ""
 
     audio_ok, audio_status = is_audio_transcription_available()
+    selected_sources: list[str] = []
 
     with st.sidebar:
         st.subheader("Engine")
-        st.session_state.theme_mode = st.toggle(
+        st.session_state.dark_theme = st.toggle(
             "Dark Theme",
-            value=st.session_state.theme_mode == "Dark",
+            value=st.session_state.dark_theme,
         )
-        theme_mode = "Dark" if st.session_state.theme_mode else "Light"
+        theme_mode = "Dark" if st.session_state.dark_theme else "Light"
 
         st.subheader("API Keys")
         default_groq_key = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else ""
@@ -247,6 +312,7 @@ def main() -> None:
         modality_filter = st.selectbox("Retrieve", ["both", "text", "image"], index=0)
         use_vision = st.toggle("Use Vision for Image Q&A", value=True)
         memory_turns = st.slider("Memory Turns", min_value=0, max_value=8, value=4, step=1)
+        show_retrieval_preview = st.toggle("Preview Retrieval Before Answer", value=False)
 
         st.divider()
         st.subheader("Knowledge Files")
@@ -273,6 +339,21 @@ def main() -> None:
         process_files = st.button("Process + Build Index", use_container_width=True, type="primary")
         clear_kb = st.button("Clear Knowledge Base", use_container_width=True)
 
+        st.divider()
+        st.subheader("Session Tools")
+        export_payload = {
+            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "messages": st.session_state.chat_history,
+        }
+        st.download_button(
+            "Export Chat JSON",
+            data=json.dumps(export_payload, indent=2),
+            file_name="rag_chat_export.json",
+            mime="application/json",
+            use_container_width=True,
+            disabled=not st.session_state.chat_history,
+        )
+
     apply_custom_css(theme_mode)
 
     engine = None
@@ -295,6 +376,18 @@ def main() -> None:
         engine.reset()
         st.session_state.chat_history = []
         st.success("Knowledge base cleared.")
+
+    if engine and engine.chunks:
+        source_options = sorted({chunk.source for chunk in engine.chunks})
+        with st.sidebar:
+            st.divider()
+            st.subheader("Retrieval Scope")
+            selected_sources = st.multiselect(
+                "Limit answers to selected sources",
+                options=source_options,
+                default=source_options,
+                help="If nothing is selected, all indexed sources are used.",
+            )
 
     render_header(engine)
 
@@ -339,74 +432,127 @@ def main() -> None:
                 else:
                     st.warning("No usable text found in the uploaded files.")
 
-    st.subheader("Chat")
+    source_filter = set(selected_sources) if selected_sources else None
+    tab_chat, tab_kb = st.tabs(["Chat", "Knowledge Base"])
 
-    if not groq_api_key or not jina_api_key:
-        st.info("Enter your GROQ + Jina API keys in the sidebar to start.")
+    with tab_chat:
+        st.subheader("Chat")
+        if not groq_api_key or not jina_api_key:
+            st.info("Enter your GROQ + Jina API keys in the sidebar to start.")
 
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message.get("context"):
-                with st.expander("Retrieved Context"):
-                    for idx, ctx in enumerate(message["context"], start=1):
-                        st.caption(f"Chunk {idx} - {ctx.get('modality', 'text')} - {ctx.get('source', 'source')}")
-                        st.write(ctx.get("text", ""))
-                        if ctx.get("modality") == "image" and ctx.get("meta", {}).get("image_b64"):
-                            st.image(ctx["meta"]["image_b64"], caption=ctx.get("meta", {}).get("image", ""))
+        st.markdown('<div class="block">Quick prompts</div>', unsafe_allow_html=True)
+        quick_prompts = [
+            "Summarize the key points from the uploaded files.",
+            "What are the most important findings across all sources?",
+            "Give me a concise bullet summary with source names.",
+            "What information is missing to answer confidently?",
+        ]
+        cols = st.columns(2)
+        for idx, prompt in enumerate(quick_prompts):
+            if cols[idx % 2].button(prompt, key=f"quick_prompt_{idx}", use_container_width=True):
+                st.session_state.quick_prompt = prompt
 
-    user_query = st.chat_input("Ask a question about your uploaded knowledge base...")
-    if user_query:
-        if not engine or not engine.is_ready:
-            st.warning("Process files first so the FAISS index is ready.")
-            return
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                if message.get("context"):
+                    with st.expander("Retrieved Context"):
+                        for idx, ctx in enumerate(message["context"], start=1):
+                            st.caption(f"Chunk {idx} - {ctx.get('modality', 'text')} - {ctx.get('source', 'source')}")
+                            st.write(ctx.get("text", ""))
+                            if ctx.get("modality") == "image" and ctx.get("meta", {}).get("image_b64"):
+                                st.image(ctx["meta"]["image_b64"], caption=ctx.get("meta", {}).get("image", ""))
 
-        st.session_state.chat_history.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
+        typed_query = st.chat_input("Ask a question about your uploaded knowledge base...")
+        user_query = typed_query or st.session_state.quick_prompt
+        if user_query == st.session_state.quick_prompt:
+            st.session_state.quick_prompt = ""
 
-        with st.chat_message("assistant"):
-            with st.spinner("Generating grounded answer..."):
-                try:
-                    candidate_k = max(candidate_k, top_k)
-                    memory = []
-                    if memory_turns > 0:
-                        memory = st.session_state.chat_history[:-1]
-                        memory = memory[-(memory_turns * 2) :]
-                    result = engine.answer(
-                        user_query,
-                        top_k=top_k,
-                        candidate_k=candidate_k,
-                        modality_filter=modality_filter,
-                        use_rerank=use_rerank,
-                        use_vision=use_vision,
-                        memory=memory,
-                    )
-                    answer = result["answer"]
-                    context_docs = result["context_docs"]
-                    latency = result.get("latency", {})
-                except Exception as exc:
-                    answer = f"Error while generating answer: {exc}"
-                    context_docs = []
-                    latency = {}
+        if user_query:
+            if not engine or not engine.is_ready:
+                st.warning("Process files first so the FAISS index is ready.")
+                return
 
-            st.markdown(answer)
-            if context_docs:
-                with st.expander("Retrieved Context"):
-                    for idx, ctx in enumerate(context_docs, start=1):
-                        st.caption(f"Chunk {idx} - {ctx.get('modality', 'text')} - {ctx.get('source', 'source')}")
-                        st.write(ctx.get("text", ""))
-                        if ctx.get("modality") == "image" and ctx.get("meta", {}).get("image_b64"):
-                            st.image(ctx["meta"]["image_b64"], caption=ctx.get("meta", {}).get("image", ""))
+            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            with st.chat_message("user"):
+                st.markdown(user_query)
 
-            if latency:
-                with st.expander("Latency Breakdown"):
-                    for key, value in latency.items():
-                        st.write(f"{key}: {value:.2f}s")
+            with st.chat_message("assistant"):
+                with st.spinner("Generating grounded answer..."):
+                    try:
+                        candidate_k = max(candidate_k, top_k)
+                        memory = []
+                        if memory_turns > 0:
+                            memory = st.session_state.chat_history[:-1]
+                            memory = memory[-(memory_turns * 2) :]
 
-        st.session_state.chat_history.append(
-            {"role": "assistant", "content": answer, "context": context_docs}
-        )
+                        if show_retrieval_preview:
+                            preview_docs = engine.retrieve(
+                                user_query,
+                                top_k=candidate_k,
+                                modality_filter=modality_filter,
+                                source_filter=source_filter,
+                            )
+                            if preview_docs:
+                                with st.expander("Preview: Retrieved Candidates", expanded=False):
+                                    for idx, doc in enumerate(preview_docs, start=1):
+                                        st.caption(f"Candidate {idx} - {doc.modality} - {doc.source}")
+                                        st.write(doc.text)
+
+                        result = engine.answer(
+                            user_query,
+                            top_k=top_k,
+                            candidate_k=candidate_k,
+                            modality_filter=modality_filter,
+                            source_filter=source_filter,
+                            use_rerank=use_rerank,
+                            use_vision=use_vision,
+                            memory=memory,
+                        )
+                        answer = result["answer"]
+                        context_docs = result["context_docs"]
+                        latency = result.get("latency", {})
+                    except Exception as exc:
+                        answer = f"Error while generating answer: {exc}"
+                        context_docs = []
+                        latency = {}
+
+                st.markdown(answer)
+                if context_docs:
+                    with st.expander("Retrieved Context"):
+                        for idx, ctx in enumerate(context_docs, start=1):
+                            st.caption(f"Chunk {idx} - {ctx.get('modality', 'text')} - {ctx.get('source', 'source')}")
+                            st.write(ctx.get("text", ""))
+                            if ctx.get("modality") == "image" and ctx.get("meta", {}).get("image_b64"):
+                                st.image(ctx["meta"]["image_b64"], caption=ctx.get("meta", {}).get("image", ""))
+
+                if latency:
+                    with st.expander("Latency Breakdown"):
+                        for key, value in latency.items():
+                            st.write(f"{key}: {value:.2f}s")
+
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": answer, "context": context_docs}
+            )
+
+    with tab_kb:
+        render_kb_explorer(engine)
+        probe_query = st.text_input("Probe retrieval quality", placeholder="Enter a question to inspect raw retrieval...")
+        if probe_query and engine and engine.is_ready:
+            try:
+                probe_docs = engine.retrieve(
+                    probe_query,
+                    top_k=6,
+                    modality_filter=modality_filter,
+                    source_filter=source_filter,
+                )
+            except Exception as exc:
+                st.error(f"Probe failed: {exc}")
+                probe_docs = []
+            if probe_docs:
+                for idx, doc in enumerate(probe_docs, start=1):
+                    st.caption(f"Hit {idx} - {doc.modality} - {doc.source}")
+                    st.write(doc.text)
 
 
 if __name__ == "__main__":
