@@ -1,16 +1,34 @@
-# Advanced RAG UI App
+﻿# Enterprise Multimodal RAG (Text + Vision)
 
-Modern Streamlit UI for your notebook workflow:
-- Upload `.txt` or `.pdf`
-- Build TF-IDF embeddings + FAISS vector index
-- Ask grounded questions using Groq LLM responses
-- Inspect retrieved chunks in the chat UI
+End-to-end multimodal Retrieval-Augmented Generation system for grounded QA over:
+- Text files (TXT, PDF)
+- Images (diagrams, charts, screenshots)
 
-## Files
+## Features
+- FAISS retrieval over Jina Embeddings v4
+- Groq Vision image captioning
+- Groq grounded answer generation
+- Simple reranker
+- Metadata filtering: `text`, `image`, `both`
+- Session chat memory and latency tracking in Streamlit
 
-- `main.py`: reusable RAG engine (ingestion, chunking, retrieval, answer generation)
-- `app.py`: modern Streamlit UI
-- `requirements.txt`: Python dependencies
+## Project Structure
+
+```bash
+multimodal-rag-jina4/
+├── app.py
+├── requirements.txt
+├── config.py
+├── README.md
+└── rag/
+    ├── __init__.py
+    ├── embeddings.py
+    ├── retriever.py
+    ├── chunking.py
+    ├── vision.py
+    ├── reranker.py
+    └── llm.py
+```
 
 ## Setup
 
@@ -20,23 +38,12 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+Set environment variables or provide them in the app UI:
+- `GROQ_API_KEY`
+- `JINA_API_KEY`
+
 ## Run
 
 ```bash
 streamlit run app.py
 ```
-
-Then open the local URL shown by Streamlit.
-
-## Usage
-
-1. Enter your `GROQ_API_KEY` in the sidebar form.
-2. Upload a `.txt` or `.pdf` document.
-3. Click **Build Index**.
-4. Ask questions in the chat box.
-
-## Notes
-
-- Answers are constrained to retrieved context.
-- If context is insufficient, the app returns a fallback response.
-- This project does not commit API keys in source code.

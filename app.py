@@ -1,188 +1,207 @@
+﻿"""Enterprise Multimodal RAG (Text + Vision).
+
+Run:
+    streamlit run app.py
+"""
 import tempfile
+import time
 from pathlib import Path
+from typing import Dict, List
 
 import streamlit as st
 
-from main import AdvancedRAGEngine
+from config import AppConfig
+from rag.chunking import extract_text_from_file
+from rag.embeddings import JinaV4Embedder
+from rag.llm import GroqAnswerGenerator
+from rag.retriever import Chunk, MultiModalRetriever
+from rag.reranker import SimpleReranker
+from rag.vision import GroqVisionCaptioner
 
-st.set_page_config(page_title="Advanced RAG Studio", page_icon="🧠", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap');
-
-    html, body, [class*="css"]  {
-        font-family: 'Space Grotesk', sans-serif;
-    }
-
-    .stApp {
-        background: radial-gradient(circle at 15% 10%, #d6f5ff 0%, transparent 35%),
-                    radial-gradient(circle at 80% 20%, #dff8e8 0%, transparent 35%),
-                    linear-gradient(120deg, #f4f8ff 0%, #fdfcf8 50%, #f6fff9 100%);
-        color: #111827;
-    }
-
-    .hero {
-        padding: 1.25rem;
-        border-radius: 18px;
-        background: rgba(255, 255, 255, 0.78);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(17, 24, 39, 0.08);
-        box-shadow: 0 14px 35px rgba(17, 24, 39, 0.08);
-        animation: floatIn 0.55s ease;
-    }
-
-    .chip {
-        display: inline-block;
-        font-size: 0.8rem;
-        font-weight: 700;
-        padding: 0.25rem 0.55rem;
-        border-radius: 999px;
-        background: #111827;
-        color: #f9fafb;
-    }
-
-    .card {
-        border-radius: 14px;
-        background: rgba(255, 255, 255, 0.75);
-        border: 1px solid rgba(17, 24, 39, 0.08);
-        padding: 0.8rem 0.95rem;
-        margin-bottom: 0.65rem;
-        animation: slideUp 0.35s ease;
-    }
-
-    @keyframes floatIn {
-      from {opacity: 0; transform: translateY(18px) scale(0.98);} 
-      to {opacity: 1; transform: translateY(0) scale(1);} 
-    }
-
-    @keyframes slideUp {
-      from {opacity: 0; transform: translateY(12px);} 
-      to {opacity: 1; transform: translateY(0);} 
-    }
-
-    .stButton>button {
-        border-radius: 11px;
-        border: none;
-        font-weight: 700;
-        background: linear-gradient(135deg, #0f766e, #0891b2);
-        color: #ffffff;
-        box-shadow: 0 10px 24px rgba(8, 145, 178, 0.25);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-if "engine" not in st.session_state:
-    st.session_state.engine = None
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "kb_loaded" not in st.session_state:
-    st.session_state.kb_loaded = False
+st.set_page_config(page_title="Multimodal RAG Studio", layout="wide")
 
 st.markdown(
     """
-    <div class="hero">
-        <span class="chip">ADVANCED RAG</span>
-        <h1 style="margin: 0.5rem 0 0.25rem 0;">Document Q&A Studio</h1>
-        <p style="margin: 0; color: #334155;">Upload TXT/PDF, build TF-IDF + FAISS index, and chat with grounded answers via Groq.</p>
-    </div>
-    """,
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Manrope', sans-serif; }
+:root {
+  --bg-a: #fdf6e3;
+  --bg-b: #eaf4ff;
+  --ink: #111827;
+  --card: rgba(255,255,255,0.82);
+  --brand: #0f766e;
+  --brand2: #0ea5a3;
+}
+.stApp {
+  background: radial-gradient(circle at 10% 10%, rgba(14,165,163,0.15), transparent 30%),
+              radial-gradient(circle at 80% 15%, rgba(14,116,144,0.13), transparent 30%),
+              linear-gradient(120deg, var(--bg-a), var(--bg-b));
+  color: var(--ink);
+}
+.hero {
+  border: 1px solid rgba(17,24,39,.1);
+  border-radius: 18px;
+  padding: 16px;
+  background: var(--card);
+  box-shadow: 0 10px 30px rgba(17,24,39,.08);
+  animation: in .4s ease;
+}
+.card {
+  border: 1px solid rgba(17,24,39,.08);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 10px;
+}
+.stButton>button {
+  border: none;
+  border-radius: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, var(--brand), var(--brand2));
+}
+@keyframes in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+</style>
+""",
     unsafe_allow_html=True,
 )
 
-left, right = st.columns([1, 1.8], gap="large")
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+if "chat" not in st.session_state:
+    st.session_state.chat = []
+if "metrics" not in st.session_state:
+    st.session_state.metrics = {}
+
+st.markdown(
+    """
+<div class="hero">
+  <h1 style="margin:0;">Enterprise Multimodal RAG</h1>
+  <p style="margin:.4rem 0 0 0;">Grounded QA over text documents and images with Groq + Jina + FAISS.</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+left, right = st.columns([1.05, 1.7], gap="large")
 
 with left:
-    st.subheader("Knowledge Base Setup")
+    st.subheader("Setup")
+    env_cfg = AppConfig.from_env()
 
-    api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
+    groq_key = st.text_input("GROQ_API_KEY", type="password", value=env_cfg.groq_api_key)
+    jina_key = st.text_input("JINA_API_KEY", type="password", value=env_cfg.jina_api_key)
 
-    uploaded_file = st.file_uploader("Upload a source file", type=["txt", "pdf"])
+    text_file = st.file_uploader("Upload TXT or PDF", type=["txt", "pdf"])
+    image_file = st.file_uploader("Upload image (optional)", type=["png", "jpg", "jpeg", "webp"])
 
     c1, c2 = st.columns(2)
     with c1:
-        chunk_size = st.slider("Chunk size (words)", min_value=80, max_value=350, value=180, step=10)
+        chunk_size = st.slider("Chunk size", min_value=120, max_value=600, value=300, step=20)
     with c2:
-        chunk_overlap = st.slider("Chunk overlap", min_value=0, max_value=100, value=40, step=5)
+        overlap = st.slider("Chunk overlap", min_value=20, max_value=200, value=60, step=10)
 
-    if st.button("Build Index", use_container_width=True):
-        if not api_key:
-            st.error("Please provide your Groq API key.")
-        elif not uploaded_file:
-            st.error("Please upload a TXT or PDF file.")
+    build_btn = st.button("Build Knowledge Base", use_container_width=True)
+
+    if build_btn:
+        if not groq_key or not jina_key:
+            st.error("Both GROQ_API_KEY and JINA_API_KEY are required.")
+        elif not text_file and not image_file:
+            st.error("Upload at least one file (text or image).")
         else:
-            suffix = Path(uploaded_file.name).suffix
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded_file.getbuffer())
-                tmp_path = tmp.name
+            build_start = time.perf_counter()
+            embedder = JinaV4Embedder(api_key=jina_key)
+            retriever = MultiModalRetriever(embedder=embedder, chunk_size=chunk_size, chunk_overlap=overlap)
 
             try:
-                engine = AdvancedRAGEngine(
-                    groq_api_key=api_key,
-                    chunk_size_words=chunk_size,
-                    chunk_overlap_words=chunk_overlap,
-                )
-                total_chunks = engine.ingest_file(tmp_path)
-                st.session_state.engine = engine
-                st.session_state.kb_loaded = True
-                st.session_state.messages = []
-                st.success(f"Knowledge base ready. {total_chunks} chunks indexed.")
-            except Exception as exc:
-                st.error(f"Failed to build index: {exc}")
+                if text_file:
+                    suffix = Path(text_file.name).suffix
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as t:
+                        t.write(text_file.getbuffer())
+                        tpath = t.name
+                    text = extract_text_from_file(tpath)
+                    retriever.add_text(text, source=text_file.name)
 
-    if st.session_state.kb_loaded and st.session_state.engine:
+                if image_file:
+                    vision = GroqVisionCaptioner(api_key=groq_key, model=env_cfg.vision_model)
+                    caption = vision.caption_bytes(image_file.getvalue(), mime=image_file.type or "image/png")
+                    retriever.add_image_caption(caption, source=image_file.name)
+
+                if retriever.total_chunks == 0:
+                    st.error("No chunks were created. Check your files.")
+                else:
+                    retriever.build()
+                    st.session_state.retriever = retriever
+                    st.session_state.chat = []
+                    st.session_state.metrics = {
+                        "build_latency_sec": round(time.perf_counter() - build_start, 3),
+                        "chunks": retriever.total_chunks,
+                    }
+                    st.success(f"Index ready with {retriever.total_chunks} chunks.")
+            except Exception as exc:
+                st.error(f"Failed to build knowledge base: {exc}")
+
+    if st.session_state.retriever:
+        m = st.session_state.metrics
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.write(f"**Source:** {st.session_state.engine.source_name}")
-        st.write(f"**Chunks:** {len(st.session_state.engine.chunks)}")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.write(f"Chunks: **{m.get('chunks', 0)}**")
+        st.write(f"Build latency: **{m.get('build_latency_sec', 0)} sec**")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 with right:
     st.subheader("Chat")
-    top_k = st.slider("Top-k retrieval", min_value=1, max_value=8, value=3)
+    modality = st.selectbox("Metadata filter", options=["both", "text", "image"], index=0)
+    top_k = st.slider("Top-k", min_value=1, max_value=8, value=4)
 
-    for msg in st.session_state.messages:
+    for msg in st.session_state.chat[-12:]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg.get("context"):
-                with st.expander("Retrieved Context"):
-                    for i, item in enumerate(msg["context"], start=1):
-                        st.markdown(
-                            f"<div class='card'><b>Chunk {i}</b> | score: {item.score:.4f}<br>{item.chunk[:650]}...</div>",
-                            unsafe_allow_html=True,
-                        )
+            if msg.get("contexts"):
+                with st.expander("Retrieved context"):
+                    for i, c in enumerate(msg["contexts"], 1):
+                        st.markdown(f"**{i}. [{c.modality}] {c.source}**\n\n{c.text[:500]}...")
 
-    question = st.chat_input("Ask a question about your uploaded document...")
-
-    if question:
-        st.session_state.messages.append({"role": "user", "content": question})
+    q = st.chat_input("Ask a question about your text/image context...")
+    if q:
+        st.session_state.chat.append({"role": "user", "content": q})
         with st.chat_message("user"):
-            st.markdown(question)
+            st.markdown(q)
 
-        if not st.session_state.kb_loaded or not st.session_state.engine:
-            answer = "Please build the index first from the setup panel."
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+        retriever = st.session_state.retriever
+        if not retriever:
+            msg = "Build the knowledge base first."
+            st.session_state.chat.append({"role": "assistant", "content": msg})
             with st.chat_message("assistant"):
-                st.markdown(answer)
+                st.markdown(msg)
         else:
-            with st.spinner("Generating grounded answer..."):
-                try:
-                    answer, docs = st.session_state.engine.answer(question, top_k=top_k)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer, "context": docs}
-                    )
-                    with st.chat_message("assistant"):
-                        st.markdown(answer)
-                        with st.expander("Retrieved Context"):
-                            for i, item in enumerate(docs, start=1):
-                                st.markdown(
-                                    f"<div class='card'><b>Chunk {i}</b> | score: {item.score:.4f}<br>{item.chunk[:650]}...</div>",
-                                    unsafe_allow_html=True,
-                                )
-                except Exception as exc:
-                    err = f"Error while answering: {exc}"
-                    st.session_state.messages.append({"role": "assistant", "content": err})
-                    with st.chat_message("assistant"):
-                        st.error(err)
+            gen_start = time.perf_counter()
+            llm = GroqAnswerGenerator(api_key=groq_key, model=env_cfg.llm_model)
+            reranker = SimpleReranker()
+
+            try:
+                retrieved = retriever.search(q, top_k=top_k, modality_filter=modality)
+                reranked = reranker.rank(q, retrieved)[:top_k]
+                answer = llm.answer(query=q, contexts=reranked, max_history=4, history=st.session_state.chat)
+                latency = round(time.perf_counter() - gen_start, 3)
+
+                st.session_state.chat.append(
+                    {
+                        "role": "assistant",
+                        "content": f"{answer}\n\n`Latency: {latency} sec`",
+                        "contexts": reranked,
+                    }
+                )
+                with st.chat_message("assistant"):
+                    st.markdown(f"{answer}\n\n`Latency: {latency} sec`")
+                    with st.expander("Retrieved context"):
+                        for i, c in enumerate(reranked, 1):
+                            st.markdown(f"**{i}. [{c.modality}] {c.source}**\n\n{c.text[:500]}...")
+            except Exception as exc:
+                err = f"Error: {exc}"
+                st.session_state.chat.append({"role": "assistant", "content": err})
+                with st.chat_message("assistant"):
+                    st.error(err)
